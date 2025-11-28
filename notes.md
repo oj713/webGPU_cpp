@@ -40,3 +40,36 @@ Adapters provide info about underlying implementation and hardware -- limits = r
 A WebGPU device represents the context of use of the API. All objects created are owned by the device. 
 A device is requested from adapter by specifying a subset of limits and features we care about. After creation of the device, we stop using the adapter.
 
+We can use *callback functions* to get notified if the device undergoes an error or is no longer available, which is helpful for debugging. 
+
+## [Command Queue](https://eliemichel.github.io/LearnWebGPU/getting-started/the-command-queue.html)
+
+Key concept for WebGPU + many other graphics APIs
+
+Two simultaneous processes -- CPU (host, content timeline), and GPU (device, queue timeline)
+
+* Code we write runs on CPU, some of which triggers ops on the GPU. Only exceptions are *shaders* which run on GPU
+* Processes are "far away", so communication takes time
+
+Commands intended for GPU are batched and fired through "command queue" -- GPU consumes queue when its ready, minimizing idle time
+
+`wgpuQueueSubmit`sends commands, and `wgpuQueueWriteBuffer`and `wgpuQueueWriteTexture`send data from RAM to VRAM (gpu memory). 
+
+Commands are submit using `wgpuQueueSubmit(queue, /* number of commands */, /* pointer to command array */)`. With a single command, simply `wgpuQueueSubmit(queue, 1, &command);`. If number of commands is known at compile time, can use C array/std::array. Otherwise can use std::vector. Don't forget to release command buffers after submission.
+
+```
+// or, safer and avoid repeating the array size:
+std::array<WGPUCommandBuffer, 3> commands;
+commands[0] = /* [...] */;
+commands[1] = /* [...] */;
+commands[2] = /* [...] */;
+wgpuQueueSubmit(queue, commands.size(), commands.data());
+
+// Release:
+for (auto cmd : commands) {
+    wgpuCommandBufferRelease(cmd);
+}
+```
+
+We can't manually create `WGPUCommandBuffer` object, must use a command encoder. Note that the basic workflow may actually finish so fast that the code finishes and the device destructs before completion! must add manual waiting time in the case of some backends (not standardized).
+
