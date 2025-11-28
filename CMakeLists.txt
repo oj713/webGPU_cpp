@@ -8,7 +8,11 @@ project(
 # include webgpu directory to define 'webgpu' target
 add_subdirectory(webgpu)
 # minimal project -- create a target of type executable, called App, source code is main.cpp
-add_executable(App main.cpp)
+add_executable(App 
+    main.cpp
+    # utility functions in separate files
+    webgpu-utils.h
+    webgpu-utils.cpp)
 # add webgpu target as dependency of app
 target_link_libraries(App PRIVATE webgpu)
 
@@ -35,4 +39,5 @@ endif()
 # Options specific to emscripten web compiled version
 if (EMSCRIPTEN) 
     set_target_properties(App PROPERTIES SUFFIX ".html")
+    target_link_options(App PRIVATE -sASYNCIFY) # enable emscripten_sleep
 endif()
