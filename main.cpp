@@ -1,5 +1,10 @@
 #include "webgpu-utils.h"
+#include <GLFW/glfw3.h>
+#include <glfw3webgpu.h>
 #include <webgpu/webgpu.h>
+#ifdef WEBGPU_BACKEND_WGPU
+#   include <webgpu/wgpu.h>
+#endif
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
 #endif // __EMSCRIPTEN__
@@ -7,8 +12,69 @@
 #include <cassert>
 #include <vector>
 
-int main (int, char**) {
-    //std::cout << "Hello, world!" << std::endl;
+class Application {
+    public:
+        // Initialize everything, return success
+        bool Initialize();
+
+        // Unitialize everything
+        void Terminate();
+        
+        // Draw a frame and handle events
+        void MainLoop();
+
+        // Reeturn true while loop should keep running
+        bool IsRunning();
+
+    private:
+        // shared vars between init and main loop
+        GLFWwindow *window;
+        WGPUDevice device;
+        WGPUQueue queue;
+        WGPUSurface surface; // connects device to window
+};
+
+int main () {
+    Application app;
+
+    if (!app.Initialize()) {
+        return 1;
+    }
+    
+    #ifdef __EMSCRIPTEN__
+        auto callback = [](void *arg) {
+            //                  ^^^ we get address of app in callback
+            Application* pApp = reinterpret_cast<Application*>(arg);
+            //                    ^^^^^^^^^^^^ force address to be intepreted as pointer to application object
+            pApp->MainLoop();
+        };
+        emscripten_set_main_loop_arg(callback, &app, 0, true); // pass application address
+    #else   
+        while (app.IsRunning()) {
+            app.MainLoop();
+        }
+    #endif
+
+    app.Terminate();
+    return 0;
+}
+
+bool Application::Initialize() {
+    // Open Window
+    glfwInit(); // Initialize library
+    if (!glfwInit()) {
+        std::cerr << "Could not initialize GLFW!" << std::endl;
+        return 1;
+    }
+    // Setting extra arguments before creating window
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // ignore graphics api
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); // prevents resizable window
+    window = glfwCreateWindow(640, 480, "Learn WebGPU", nullptr, nullptr);
+    if (!window) {
+        std::cerr << "Could not open window" << std::endl;
+        glfwTerminate();
+        return 1;
+    }
 
     // Create WebGPU instance
     WGPUInstanceDescriptor desc = {}; // Create descriptor (specifies options for setup)
@@ -31,6 +97,8 @@ int main (int, char**) {
     std::cout << "Requesting adapter..." << std::endl;
     WGPURequestAdapterOptions adapterOpts = {};
     adapterOpts.nextInChain = nullptr;
+    surface = glfwGetWGPUSurface(instance, window);
+    adapterOpts.compatibleSurface = surface;
     WGPUAdapter adapter = requestAdapterSync(instance, &adapterOpts);
     std::cout << "Got adapter: " << adapter << std::endl;
     inspectAdapter(adapter);
@@ -53,9 +121,10 @@ int main (int, char**) {
         if (message) std::cout << " (" << message << ")";
         std::cout << std::endl;
     };
-    WGPUDevice device = requestDeviceSync(adapter, &deviceDesc);
+    device = requestDeviceSync(adapter, &deviceDesc);
     std::cout << "Got device: " << device << std::endl;
     wgpuAdapterRelease(adapter);
+
     // Uncaptured error callbacks happen when we misuse the API, informative feedback. SET AFTER DEVICE CREATION 
     auto onDeviceError = [](WGPUErrorType type, char const* message, void* /* pUserData*/) {
         std::cout << "Uncaptured device error: type " << type;
@@ -66,49 +135,29 @@ int main (int, char**) {
     inspectDevice(device);
 
     // Look at Queue
-    WGPUQueue queue = wgpuDeviceGetQueue(device);
-    auto onQueueWorkDone = [](WGPUQueueWorkDoneStatus status, void* /* pUserData */) {
-        std::cout << "Queued work finished with status: " << status << std::endl;
-    };
-    wgpuQueueOnSubmittedWorkDone(queue, onQueueWorkDone, nullptr);
+    queue = wgpuDeviceGetQueue(device);
+    return true;
+}
 
-    //Create command encoder for queue
-    WGPUCommandEncoderDescriptor encoderDesc = {};
-    encoderDesc.nextInChain = nullptr;
-    encoderDesc.label = "My command encoder";
-    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
+void Application::Terminate() {
+    glfwDestroyWindow(window);
+    glfwTerminate();
 
-    // Writing instructions, for now just debug placeholder.
-    wgpuCommandEncoderInsertDebugMarker(encoder, "Do one thing");
-    wgpuCommandEncoderInsertDebugMarker(encoder, "Do one thing");
-
-    // Generating commands from encoder requires another descriptor
-    WGPUCommandBufferDescriptor cmdBufferDescriptor = {};
-    cmdBufferDescriptor.nextInChain = nullptr;
-    cmdBufferDescriptor.label = "Command buffer";
-    WGPUCommandBuffer command = wgpuCommandEncoderFinish(encoder, &cmdBufferDescriptor);
-    wgpuCommandEncoderRelease(encoder); // release encoder after it's finished
-
-    // Submit the command queue
-    std::cout << "Submitting command..." << std::endl;
-    wgpuQueueSubmit(queue, 1, &command);
-    wgpuCommandBufferRelease(command); 
-    std::cout << "Command submitted." << std::endl;
-
-    for (int i = 0; i < 5; ++i) {
-        std::cout << "Tick/Poll device..." << std::endl;
-        #if defined(WEBGPU_BACKEND_DAWN)
-            wgpuDeviceTick(device);
-        //#elif defined(WEBGPU_BACKEND_WGPU)
-            //wgpuDevicePoll(device, false, nullptr);
-        #elif defined(WEBGPU_BACKEND_EMSCRIPTEN)
-            emscripten_sleep(100);
-        #endif
-    }
-
-    // Shutdown
     wgpuQueueRelease(queue);
     wgpuDeviceRelease(device);
+    wgpuSurfaceRelease(surface);
+}
 
-    return 0;
+void Application::MainLoop() {
+    glfwPollEvents();
+
+    #if defined(WEBGPU_BACKEND_DAWN)
+	    wgpuDeviceTick(device);
+    #elif defined(WEBGPU_BACKEND_WGPU)
+        wgpuDevicePoll(device, false, nullptr);
+    #endif
+}
+
+bool Application::IsRunning() {
+    return !glfwWindowShouldClose(window);
 }

@@ -73,3 +73,27 @@ for (auto cmd : commands) {
 
 We can't manually create `WGPUCommandBuffer` object, must use a command encoder. Note that the basic workflow may actually finish so fast that the code finishes and the device destructs before completion! must add manual waiting time in the case of some backends (not standardized).
 
+# Device Interactions
+
+## Opening a window
+
+Creating a window usually varies by platform -- using [GLFW](https://www.glfw.org/) library to unify window management APIs (common choice and ensures agnostic code). We can create a main loop, as seen below, but this will NOT work with emscripten. Instead we must create an application class.
+
+```
+glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // ignore graphics api
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); // prevents resizable window
+    GLFWwindow* window = glfwCreateWindow(640, 480, "Learn WebGPU", nullptr, nullptr);
+    if (!window) {
+        std::cerr << "Could not open window" << std::endl;
+        glfwTerminate();
+        return 1;
+    }
+
+    // add a loop
+    while(!glfwWindowShouldClose(window)) {
+        // check if user clicked on close button or triggered another event
+        glfwPollEvents();
+    }
+
+    glfwDestroyWindow(window);
+```
