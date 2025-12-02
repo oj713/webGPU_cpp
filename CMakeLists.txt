@@ -19,10 +19,7 @@ add_subdirectory(glfw3webgpu)
 add_subdirectory(webgpu)
 # minimal project -- create a target of type executable, called App, source code is main.cpp
 add_executable(App 
-    main.cpp
-    # utility functions in separate files
-    webgpu-utils.h
-    webgpu-utils.cpp)
+    main.cpp) # deleted utility functions
 # add webgpu target as dependency of app
 target_link_libraries(App PRIVATE webgpu glfw glfw3webgpu)
 
