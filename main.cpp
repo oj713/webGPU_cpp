@@ -27,6 +27,9 @@ class Application {
         bool IsRunning();
 
     private:
+        // retrieves next target texture view
+        std::pair<WGPUSurfaceTexture, WGPUTextureView> GetNextSurfaceViewData();
+
         // shared vars between init and main loop
         GLFWwindow *window;
         WGPUDevice device;
@@ -41,19 +44,19 @@ int main () {
         return 1;
     }
     
-    #ifdef __EMSCRIPTEN__
-        auto callback = [](void *arg) {
-            //                  ^^^ we get address of app in callback
-            Application* pApp = reinterpret_cast<Application*>(arg);
-            //                    ^^^^^^^^^^^^ force address to be intepreted as pointer to application object
-            pApp->MainLoop();
-        };
-        emscripten_set_main_loop_arg(callback, &app, 0, true); // pass application address
-    #else   
-        while (app.IsRunning()) {
-            app.MainLoop();
-        }
-    #endif
+#ifdef __EMSCRIPTEN__
+    auto callback = [](void *arg) {
+        //                  ^^^ we get address of app in callback
+        Application* pApp = reinterpret_cast<Application*>(arg);
+        //                    ^^^^^^^^^^^^ force address to be intepreted as pointer to application object
+        pApp->MainLoop();
+    };
+    emscripten_set_main_loop_arg(callback, &app, 0, true); // pass application address
+#else   
+    while (app.IsRunning()) {
+        app.MainLoop();
+    }
+#endif
 
     app.Terminate();
     return 0;
@@ -80,11 +83,11 @@ bool Application::Initialize() {
     WGPUInstanceDescriptor desc = {}; // Create descriptor (specifies options for setup)
     desc.nextInChain = nullptr; // allow for future custom expansions
     // Create instance using the descriptor
-    #ifdef WEBGPU_BACKEND_EMSCRIPTEN
-        WGPUInstance instance = wgpuCreateInstance(nullptr);
-    #else // WEBGPU_BACKEND_EMSCRIPTEN
-        WGPUInstance instance = wgpuCreateInstance(&desc);
-    #endif
+#ifdef WEBGPU_BACKEND_EMSCRIPTEN
+    WGPUInstance instance = wgpuCreateInstance(nullptr);
+#else // WEBGPU_BACKEND_EMSCRIPTEN
+    WGPUInstance instance = wgpuCreateInstance(&desc);
+#endif
     // Check instance
     if (!instance) {
         std::cerr << "could not initialise webgpu" << std::endl;
@@ -123,7 +126,6 @@ bool Application::Initialize() {
     };
     device = requestDeviceSync(adapter, &deviceDesc);
     std::cout << "Got device: " << device << std::endl;
-    wgpuAdapterRelease(adapter);
 
     // Uncaptured error callbacks happen when we misuse the API, informative feedback. SET AFTER DEVICE CREATION 
     auto onDeviceError = [](WGPUErrorType type, char const* message, void* /* pUserData*/) {
@@ -136,6 +138,24 @@ bool Application::Initialize() {
 
     // Look at Queue
     queue = wgpuDeviceGetQueue(device);
+
+    // Configure the surface
+    WGPUSurfaceConfiguration config = {};
+    config.width = 640;
+    config.height = 480;
+    config.nextInChain = nullptr;
+    // specificy params for textures in swap chain
+    WGPUTextureFormat surfaceFormat = wgpuSurfaceGetPreferredFormat(surface, adapter);
+    config.format = surfaceFormat;
+    config.viewFormatCount = 0;
+    config.viewFormats = nullptr;
+    config.usage = WGPUTextureUsage_RenderAttachment; // dictates memory organisation
+    config.device = device;
+    config.presentMode = WGPUPresentMode_Fifo; // first in, first out (compared to immediate, mailbox w single queue)
+    config.alphaMode = WGPUCompositeAlphaMode_Auto; // how textures are on the window, useful for transparency
+    wgpuSurfaceConfigure(surface, &config);
+   
+    wgpuAdapterRelease(adapter);
     return true;
 }
 
@@ -145,19 +165,105 @@ void Application::Terminate() {
 
     wgpuQueueRelease(queue);
     wgpuDeviceRelease(device);
+    wgpuSurfaceUnconfigure(surface);
     wgpuSurfaceRelease(surface);
 }
 
 void Application::MainLoop() {
     glfwPollEvents();
 
-    #if defined(WEBGPU_BACKEND_DAWN)
-	    wgpuDeviceTick(device);
-    #elif defined(WEBGPU_BACKEND_WGPU)
-        wgpuDevicePoll(device, false, nullptr);
-    #endif
+    // get next target texture view
+    auto [surfaceTexture, targetView] = GetNextSurfaceViewData();
+    if (!targetView) {return;}
+    
+    // Create command encoder
+	WGPUCommandEncoderDescriptor encoderDesc = {};
+	encoderDesc.nextInChain = nullptr;
+	encoderDesc.label = "My command encoder";
+	WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
+
+    // Create render pass that clears screen with color
+    WGPURenderPassDescriptor renderPassDesc = {};
+    renderPassDesc.nextInChain = nullptr;
+
+    // Attachment describes the target texture of the pass
+    WGPURenderPassColorAttachment renderPassColorAttachment = {};
+    renderPassColorAttachment.view = targetView; // texture view to draw in
+    renderPassColorAttachment.resolveTarget = nullptr; // not relevant while there is no multi-sampling
+    renderPassColorAttachment.loadOp = WGPULoadOp_Clear; // load operation to perform prior to execution
+    renderPassColorAttachment.storeOp = WGPUStoreOp_Store; // op after executing render pass (stored or discarded)
+    renderPassColorAttachment.clearValue = WGPUColor{ 0.9, 0.1, 0.2, 1.0 }; // value to clear screen with
+#ifndef WEBGPU_BACKEND_WGPU
+    // not using depth buffer
+    renderPassColorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+#endif
+    // special attachments to come back to later
+    renderPassDesc.depthStencilAttachment = nullptr;
+    renderPassDesc.timestampWrites = nullptr;
+    // attaching the texture to which we edit
+    renderPassDesc.colorAttachmentCount = 1;
+    renderPassDesc.colorAttachments = &renderPassColorAttachment;
+
+    // Create render pass, end it immediately (clear screen, no draw)
+    WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
+    // finish encoding and submit
+    wgpuRenderPassEncoderEnd(renderPass);
+    wgpuRenderPassEncoderRelease(renderPass);
+
+    // Finally encode and submit the render pass
+	WGPUCommandBufferDescriptor cmdBufferDescriptor = {};
+	cmdBufferDescriptor.nextInChain = nullptr;
+	cmdBufferDescriptor.label = "Command buffer";
+	WGPUCommandBuffer command = wgpuCommandEncoderFinish(encoder, &cmdBufferDescriptor);
+	wgpuCommandEncoderRelease(encoder);
+
+	std::cout << "Submitting command..." << std::endl;
+	wgpuQueueSubmit(queue, 1, &command);
+	wgpuCommandBufferRelease(command);
+	std::cout << "Command submitted." << std::endl;
+
+    //end of frame
+    wgpuTextureViewRelease(targetView);
+#ifndef __EMSCRIPTEN__
+    wgpuSurfacePresent(surface);
+#endif
+
+#if defined(WEBGPU_BACKEND_DAWN)
+    wgpuDeviceTick(device);
+#elif defined(WEBGPU_BACKEND_WGPU)
+    wgpuDevicePoll(device, false, nullptr);
+#endif
 }
 
 bool Application::IsRunning() {
     return !glfwWindowShouldClose(window);
+}
+
+std::pair<WGPUSurfaceTexture, WGPUTextureView> Application::GetNextSurfaceViewData() {
+    WGPUSurfaceTexture surfaceTexture;
+    // surface texture is not an object, but container for multiple returns
+    // .status returns succes, .suboptimal might not issues, .texture is what we actually draw
+    wgpuSurfaceGetCurrentTexture(surface, &surfaceTexture);
+    if (surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_Success) {
+        return {surfaceTexture, nullptr};
+    }
+
+    // texture view may represent a sub part of the texture. This stuff is all just copy pasted for now. 
+    WGPUTextureViewDescriptor viewDescriptor;
+    viewDescriptor.nextInChain = nullptr;
+    viewDescriptor.label = "Surface texture view";
+    viewDescriptor.format = wgpuTextureGetFormat(surfaceTexture.texture);
+    viewDescriptor.dimension = WGPUTextureViewDimension_2D;
+    viewDescriptor.baseMipLevel = 0;
+    viewDescriptor.mipLevelCount = 1;
+    viewDescriptor.baseArrayLayer = 0;
+    viewDescriptor.arrayLayerCount = 1;
+    viewDescriptor.aspect = WGPUTextureAspect_All;
+    WGPUTextureView targetView = wgpuTextureCreateView(surfaceTexture.texture, &viewDescriptor);
+
+#ifndef WEBGPU_BACKEND_WGPU
+    wgpuTextureRelease(surfaceTexture.texture);
+#endif
+
+    return {surfaceTexture, targetView};
 }
