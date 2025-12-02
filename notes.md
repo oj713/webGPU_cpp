@@ -97,3 +97,9 @@ glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // ignore graphics api
 
     glfwDestroyWindow(window);
 ```
+
+## [Drawing](https://eliemichel.github.io/LearnWebGPU/getting-started/first-color.html)
+
+Render pipeline does not draw directly on the currently displayed texture. We draw to an off-screen texture, which replaces the current only when complete. There may be a queue of offscreen textures waiting to be presented. 
+
+Thus the surface must be configured before use. 
