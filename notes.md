@@ -1,20 +1,5 @@
 https://eliemichel.github.io/LearnWebGPU/getting-started/project-setup.html
 
-# Commands
-
-Create build files for project -- isolate built files from source code by playing them in *build/* directory using `-B build` option. 
-Build the program and generate executable. 
-Run the program. 
-
-```
-cmake . -B build
-cmake -B build -DWEBGPU_BACKEND=WGPU
-# or
-cmake -B build -DWEBGPU_BACKEND=DAWN
-cmake --build build
-build/App
-```
-
 ## WebGPU
 
 WebGPU is a *Render Hardware Interface*, meaning that it means to provide a single itnerface for multiple underlying hardwares and OSes. Within the C++ code, WebGPU is just a header file listing available procedures. However, the compiler must know where to find the implementation of these features, so we must pass these instructions explicitly. 
@@ -103,3 +88,7 @@ glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // ignore graphics api
 Render pipeline does not draw directly on the currently displayed texture. We draw to an off-screen texture, which replaces the current only when complete. There may be a queue of offscreen textures waiting to be presented. 
 
 Thus the surface must be configured before use. 
+
+### [Render Pipeline](https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/hello-triangle.html)
+
+WebGPU has a render pipeline which is predefined but can be configured using a *render pipeline* object. Pipeline executes "stages", many fixed function (limited customizability) but others are programmable. In programmable stages a shader is executed across vertices/fragments
