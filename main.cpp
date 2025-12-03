@@ -39,6 +39,20 @@ fn fs_main() -> @location(0) vec4f {
 }
 )";
 
+// Hides implementation-specific variants of device polling:
+// Device polling is critical bc we must check that the async operation is ready
+// No common interface, must encode backend specific solutions
+void wgpuPollEvents([[maybe_unused]] Device device, [[maybe_unused]] bool yieldToWebBrowser) {
+#if defined(WEBGPU_BACKEND_DAWN)
+    device.tick();
+#elif defined(WEBGPU_BACKEND_WGPU)
+    wgpuDevicePoll(device, false, nullptr);
+#elif defined(WEBGPU_BACKEND_EMSCRIPTEN)
+    if (yieldToWebBrowser) {
+        emscripten_sleep(100);
+    }
+#endif
+}
 
 class Application {
     public:
@@ -60,6 +74,9 @@ class Application {
 
         // Substep of Initialize to create render pipeline
         void InitializePipeline();
+
+        // play with buffers
+        void PlayingWithBuffers();
     
     private:
         // shared vars between init and main loop
@@ -182,6 +199,8 @@ bool Application::Initialize() {
 
     InitializePipeline();
 
+    PlayingWithBuffers();
+
     return true;
 }
 
@@ -259,7 +278,7 @@ void Application::MainLoop() {
 #if defined(WEBGPU_BACKEND_DAWN)
     device.tick();
 #elif defined(WEBGPU_BACKEND_WGPU)
-    //device.poll(false);
+    wgpuDevicePoll(device, false, nullptr);
 #endif
 }
 
@@ -383,4 +402,70 @@ void Application::InitializePipeline() {
 
     pipeline = device.createRenderPipeline(pipelineDesc);
     shaderModule.release();
+}
+
+void Application::PlayingWithBuffers() {
+    // Experimentation for "Playing with Buffers" chapter
+    // create a first buffer
+    BufferDescriptor bufferDesc;
+    bufferDesc.label = "Some GPU-side data buffer";
+    // usage hints -- use of memory. Eg if only write from CPU, never read -- set CopyDst on but not CopySrc. Helps with memory alloc
+    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::CopySrc;
+    bufferDesc.size = 16;
+    bufferDesc.mappedAtCreation = false;
+    Buffer buffer1 = device.createBuffer(bufferDesc);
+
+    // second buffer
+    bufferDesc.label = "Output buffer";
+    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::MapRead;
+    Buffer buffer2 = device.createBuffer(bufferDesc);
+
+    // write input data
+    // Create CPU side data buffer of size 16b
+    std::vector<uint8_t> numbers(16);
+    for (uint8_t i = 0; i < 16; ++i) numbers[i] = i;
+    // Copy to buffer1
+    queue.writeBuffer(buffer1, 0, numbers.data(), numbers.size());
+
+    // encode & submit buffer to buffer copy
+	CommandEncoder encoder = device.createCommandEncoder(Default);
+    encoder.copyBufferToBuffer(buffer1, 0, buffer2, 0, 16); // zeros are byte offsets
+    CommandBuffer command = encoder.finish(Default);
+    encoder.release();
+    queue.submit(1, &command);
+    command.release();
+
+    // read buffer data back
+    struct Context {
+        bool ready;
+        Buffer buffer;
+    };
+    // async function takes user data & modifies ref to context object
+    auto onBuffer2Mapped = [](WGPUBufferMapAsyncStatus status, void* pUserData) {
+        Context* context = reinterpret_cast<Context*>(pUserData);
+        context->ready = true;
+
+        std::cout << "Buffer 2 mapped w status " << status << std::endl;
+        if (status != BufferMapAsyncStatus::Success) return;
+
+        uint8_t* bufferData = (uint8_t*)context->buffer.getConstMappedRange(0, 16); // use getMappedRange in write mode
+        //display content
+        std::cout << "bufferData = [";
+        for (int i = 0; i < 16; ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << (int)bufferData[i];
+        }
+        std::cout << "]" << std::endl;
+        //unmap the memory
+        context->buffer.unmap();
+    };
+    Context context = {false, buffer2};
+    wgpuBufferMapAsync(buffer2, MapMode::Read, 0, 16, onBuffer2Mapped, (void*)&context);
+    while(!context.ready) {
+        wgpuPollEvents(device, true /*yieldToBrowser*/);
+    }
+
+    // release buffers
+    buffer1.release();
+    buffer2.release();
 }

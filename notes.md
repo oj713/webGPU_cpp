@@ -58,6 +58,8 @@ for (auto cmd : commands) {
 
 We can't manually create `WGPUCommandBuffer` object, must use a command encoder. Note that the basic workflow may actually finish so fast that the code finishes and the device destructs before completion! must add manual waiting time in the case of some backends (not standardized).
 
+Command queue only goes in one way -- CPU host to GPU device. "fire and forget" queue. In order to read back, we have to use an **async op**, set up a callback that gets invoked when data is ready
+
 # Device Interactions
 
 ## Opening a window
@@ -92,3 +94,7 @@ Thus the surface must be configured before use.
 ### [Render Pipeline](https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/hello-triangle.html)
 
 WebGPU has a render pipeline which is predefined but can be configured using a *render pipeline* object. Pipeline executes "stages", many fixed function (limited customizability) but others are programmable. In programmable stages a shader is executed across vertices/fragments
+
+## Buffers
+
+buffers are just a chunk of memory allocated in the VRAM (gpu memory). `new` or `malloc` for the gpu
