@@ -20,39 +20,32 @@ using namespace wgpu;
 // tokens w @ are "attrbutes", decorate following object. Eg @builtin(vertex_index) tells us that arg in_vertex_index will be populated by built in vertex_index
 // @builtin(position) means it must be intpereted by rasterizer as vertex position
 const char* shaderSource = R"(
+/* A structure with fields labeled w vertex attribute locations, input to entry point of shader */
+struct VertexInput {
+	@location(0) position: vec2f,
+	@location(1) color: vec3f,
+};
+
+/* struct w fields labeled as builtins, locations used as output of vertex shader (thus input of fragment shader) */
+struct VertexOutput {
+	@builtin(position) position: vec4f,
+	// The location here does not refer to a vertex attribute, it just means that this field must be handled by the rasterizer.
+	@location(0) color: vec3f,
+};
+
 @vertex
-fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) vec4f {
-	var p = vec2f(0.0, 0.0);
-	if (in_vertex_index == 0u) {
-		p = vec2f(-0.5, -0.5);
-	} else if (in_vertex_index == 1u) {
-		p = vec2f(0.5, -0.5);
-	} else {
-		p = vec2f(0.0, 0.5);
-	}
-	return vec4f(p, 0.0, 1.0);
+fn vs_main(in: VertexInput) -> VertexOutput {
+	var out: VertexOutput; 
+	out.position = vec4f(in.position, 0.0, 1.0); 
+	out.color = in.color; // forward the color attribute to the fragment shader
+	return out;
 }
 
 @fragment
-fn fs_main() -> @location(0) vec4f {
-	return vec4f(0.0, 0.4, 1.0, 1.0);
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+	return vec4f(in.color, 1.0); // use the interpolated color coming from the vertex shader
 }
 )";
-
-// Hides implementation-specific variants of device polling:
-// Device polling is critical bc we must check that the async operation is ready
-// No common interface, must encode backend specific solutions
-void wgpuPollEvents([[maybe_unused]] Device device, [[maybe_unused]] bool yieldToWebBrowser) {
-#if defined(WEBGPU_BACKEND_DAWN)
-    device.tick();
-#elif defined(WEBGPU_BACKEND_WGPU)
-    wgpuDevicePoll(device, false, nullptr);
-#elif defined(WEBGPU_BACKEND_EMSCRIPTEN)
-    if (yieldToWebBrowser) {
-        emscripten_sleep(100);
-    }
-#endif
-}
 
 class Application {
     public:
@@ -72,11 +65,11 @@ class Application {
         // retrieves next target texture view
         TextureView GetNextSurfaceTextureView();
 
-        // Substep of Initialize to create render pipeline
+        // Substeps of Initialize to create render pipeline
         void InitializePipeline();
+        RequiredLimits GetRequiredLimits(Adapter adapter) const;
+        void InitializeBuffers();
 
-        // play with buffers
-        void PlayingWithBuffers();
     
     private:
         // shared vars between init and main loop
@@ -87,6 +80,8 @@ class Application {
         TextureFormat surfaceFormat = TextureFormat::Undefined;
         std::unique_ptr<ErrorCallback> uncapturedErrorCallbackHandle; 
         RenderPipeline pipeline = nullptr;
+        uint32_t vertexCount;
+        Buffer vertexBuffer = nullptr;
 };
 
 int main () {
@@ -151,23 +146,23 @@ bool Application::Initialize() {
     // No longer need instance once we have adapter -- instance not destroyed bc referenced by adapter.
     instance.release();
 
-    // Get Device
     std::cout << "Requesting device..." << std::endl;
-    DeviceDescriptor deviceDesc = {};
-    // specify to minimal options (reference webgpu.h for arguments)
-    deviceDesc.label = "My device";
-    deviceDesc.requiredFeatureCount = 0; // no feature required specifically
-    deviceDesc.requiredLimits = 0; // no specific limit
-    deviceDesc.defaultQueue.nextInChain = nullptr;
-    deviceDesc.defaultQueue.label = "The default queue";
-    // notifications in case of error
-    deviceDesc.deviceLostCallback = [](WGPUDeviceLostReason reason, char const* message, void* /* pUserData */) {
-        std::cout << "Device lost: reason " << reason;
-        if (message) std::cout << " (" << message << ")";
-        std::cout << std::endl;
-    };
-    device = adapter.requestDevice(deviceDesc);
-    std::cout << "Got device: " << device << std::endl;
+	DeviceDescriptor deviceDesc = {};
+	deviceDesc.label = "My Device";
+	deviceDesc.requiredFeatureCount = 0;
+	deviceDesc.requiredLimits = nullptr;
+	deviceDesc.defaultQueue.nextInChain = nullptr;
+	deviceDesc.defaultQueue.label = "The default queue";
+	deviceDesc.deviceLostCallback = [](WGPUDeviceLostReason reason, char const* message, void* /* pUserData */) {
+		std::cout << "Device lost: reason " << reason;
+		if (message) std::cout << " (" << message << ")";
+		std::cout << std::endl;
+	};
+	// Before adapter.requestDevice(deviceDesc)
+	RequiredLimits requiredLimits = GetRequiredLimits(adapter);
+	deviceDesc.requiredLimits = &requiredLimits;
+	device = adapter.requestDevice(deviceDesc);
+	std::cout << "Got device: " << device << std::endl;
 
     // Uncaptured error callbacks happen when we misuse the API, informative feedback. SET AFTER DEVICE CREATION 
     uncapturedErrorCallbackHandle = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
@@ -181,25 +176,25 @@ bool Application::Initialize() {
     queue = device.getQueue();
 
     // Configure the surface
-    SurfaceConfiguration config = {};
-    config.width = 640;
-    config.height = 480;
-    // specificy params for textures in swap chain
-    surfaceFormat = surface.getPreferredFormat(adapter);
-    config.format = surfaceFormat;
-    config.viewFormatCount = 0;
-    config.viewFormats = nullptr;
-    config.usage = TextureUsage::RenderAttachment; // dictates memory organisation
-    config.device = device;
-    config.presentMode = PresentMode::Fifo; // first in, first out (compared to immediate, mailbox w single queue)
-    config.alphaMode = CompositeAlphaMode::Auto; // how textures are on the window, useful for transparency
-    surface.configure(config);
+	SurfaceConfiguration config = {};
+	// Configuration of the textures created for the underlying swap chain
+	config.width = 640;
+	config.height = 480;
+	config.usage = TextureUsage::RenderAttachment;
+	surfaceFormat = surface.getPreferredFormat(adapter);
+	config.format = surfaceFormat;
+	// And we do not need any particular view format:
+	config.viewFormatCount = 0;
+	config.viewFormats = nullptr;
+	config.device = device;
+	config.presentMode = PresentMode::Fifo;
+	config.alphaMode = CompositeAlphaMode::Auto;
 
+    surface.configure(config);
     adapter.release();
 
     InitializePipeline();
-
-    PlayingWithBuffers();
+    InitializeBuffers();
 
     return true;
 }
@@ -208,6 +203,7 @@ void Application::Terminate() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
+    vertexBuffer.release();
     pipeline.release();
     queue.release();
     device.release();
@@ -236,7 +232,7 @@ void Application::MainLoop() {
     renderPassColorAttachment.resolveTarget = nullptr; // not relevant while there is no multi-sampling
     renderPassColorAttachment.loadOp = LoadOp::Clear; // load operation to perform prior to execution
     renderPassColorAttachment.storeOp = StoreOp::Store; // op after executing render pass (stored or discarded)
-    renderPassColorAttachment.clearValue = WGPUColor{ 0.9, 0.1, 0.2, 1.0 }; // value to clear screen with
+    renderPassColorAttachment.clearValue = WGPUColor{ 0.32, 0.52, 0.06, 1.0 }; // value to clear screen with
 #ifndef WEBGPU_BACKEND_WGPU
     // not using depth buffer
     renderPassColorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
@@ -254,7 +250,8 @@ void Application::MainLoop() {
     // set rendering pipeline
     renderPass.setPipeline(pipeline);
     // draw instance of 3 vertices shape
-    renderPass.draw(3, 1, 0, 0);
+    renderPass.setVertexBuffer(0, vertexBuffer, 0, vertexBuffer.getSize());
+    renderPass.draw(vertexCount, 1, 0, 0);
 
     // End
     renderPass.end();
@@ -335,14 +332,31 @@ void Application::InitializePipeline() {
 	shaderCodeDesc.code = shaderSource; // payload = code block
 	ShaderModule shaderModule = device.createShaderModule(shaderDesc);
 
+    ////////// Specify vertex buffer layout
+    VertexBufferLayout vertexBufferLayout;
+    std::vector<VertexAttribute> vertexAttribs(2);
+    // position
+    vertexAttribs[0].shaderLocation = 0; //@location(...)
+    vertexAttribs[0].format = VertexFormat::Float32x2; // type vec2f & sequence of 2 floats
+    vertexAttribs[0].offset = 0;
+    // color
+    vertexAttribs[1].shaderLocation = 1; 
+    vertexAttribs[1].format = VertexFormat::Float32x3; // diff type, 3 floats
+    vertexAttribs[1].offset = 2 * sizeof(float); // non null offset bc the first two floats are position!
+    // metadata
+    vertexBufferLayout.attributeCount = static_cast<uint32_t>(vertexAttribs.size());
+    vertexBufferLayout.attributes = vertexAttribs.data();
+    // shared properties
+    vertexBufferLayout.arrayStride = 5 * sizeof(float); // num bytes between 2 consec elems of same category (e.g. x, y). Interweaved
+    vertexBufferLayout.stepMode = VertexStepMode::Vertex; // each value in buffer = diff vertex   
+
     ////////////// Static stages
     RenderPipelineDescriptor pipelineDesc;
 
     // Describe vertex pipeline state
-    // fetch vertex attributes from buffers (eg position, mayble color)
-    // hard code position of three vertices in this example, so no need
-    pipelineDesc.vertex.bufferCount = 0;
-    pipelineDesc.vertex.buffers = nullptr;
+    // fetch vertex attributes from buffers (eg position, maybe color)
+    pipelineDesc.vertex.bufferCount = 1;
+    pipelineDesc.vertex.buffers = &vertexBufferLayout;
     //vertex shader -- combines shader module + entry point (name of function to call) + value assignments for constants
     pipelineDesc.vertex.module = shaderModule;
 	pipelineDesc.vertex.entryPoint = "vs_main";
@@ -404,68 +418,54 @@ void Application::InitializePipeline() {
     shaderModule.release();
 }
 
-void Application::PlayingWithBuffers() {
-    // Experimentation for "Playing with Buffers" chapter
-    // create a first buffer
-    BufferDescriptor bufferDesc;
-    bufferDesc.label = "Some GPU-side data buffer";
-    // usage hints -- use of memory. Eg if only write from CPU, never read -- set CopyDst on but not CopySrc. Helps with memory alloc
-    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::CopySrc;
-    bufferDesc.size = 16;
-    bufferDesc.mappedAtCreation = false;
-    Buffer buffer1 = device.createBuffer(bufferDesc);
+RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
+    //get adapter supported limits in case needed
+    SupportedLimits supportedLimits;
+	adapter.getLimits(&supportedLimits);
 
-    // second buffer
-    bufferDesc.label = "Output buffer";
-    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::MapRead;
-    Buffer buffer2 = device.createBuffer(bufferDesc);
+    RequiredLimits requiredLimits = Default;
 
-    // write input data
-    // Create CPU side data buffer of size 16b
-    std::vector<uint8_t> numbers(16);
-    for (uint8_t i = 0; i < 16; ++i) numbers[i] = i;
-    // Copy to buffer1
-    queue.writeBuffer(buffer1, 0, numbers.data(), numbers.size());
+    requiredLimits.limits.maxVertexAttributes = 2; // position, color 
+    requiredLimits.limits.maxVertexBuffers = 1;
+    requiredLimits.limits.maxBufferSize = 6 * 5 * sizeof(float); // 6 = num points, 5 = attributes per point
+    requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float); 
+    // necessary for surface configuration
+    requiredLimits.limits.maxTextureDimension1D = 480;
+    requiredLimits.limits.maxTextureDimension2D = 640;
+    // max of 3 floats forwarded from vertex to fragment shader
+    requiredLimits.limits.maxInterStageShaderComponents = 3; 
 
-    // encode & submit buffer to buffer copy
-	CommandEncoder encoder = device.createCommandEncoder(Default);
-    encoder.copyBufferToBuffer(buffer1, 0, buffer2, 0, 16); // zeros are byte offsets
-    CommandBuffer command = encoder.finish(Default);
-    encoder.release();
-    queue.submit(1, &command);
-    command.release();
+    // https://www.w3.org/TR/webgpu/#limit-default
 
-    // read buffer data back
-    struct Context {
-        bool ready;
-        Buffer buffer;
+    // These two limits are different because they are "minimum" limits,
+    // they are the only ones we may forward from the adapter's supported
+    // limits.
+    requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
+    requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
+
+    return requiredLimits;
+}
+
+void Application::InitializeBuffers() {
+    std::vector<float> vertexData = {
+        // x0,  y0,  r0,  g0,  b0
+        -0.5, -0.5, 1.0, 0.0, 0.0,
+        +0.5, -0.5, 0.0, 1.0, 0.0,
+        +0.0,   +0.5, 0.0, 0.0, 1.0,
+
+        -0.55f, -0.5, 1.0, 1.0, 0.0,
+        -0.05f, +0.5, 1.0, 0.0, 1.0,
+        -0.55f, +0.5, 0.0, 1.0, 1.0
     };
-    // async function takes user data & modifies ref to context object
-    auto onBuffer2Mapped = [](WGPUBufferMapAsyncStatus status, void* pUserData) {
-        Context* context = reinterpret_cast<Context*>(pUserData);
-        context->ready = true;
-
-        std::cout << "Buffer 2 mapped w status " << status << std::endl;
-        if (status != BufferMapAsyncStatus::Success) return;
-
-        uint8_t* bufferData = (uint8_t*)context->buffer.getConstMappedRange(0, 16); // use getMappedRange in write mode
-        //display content
-        std::cout << "bufferData = [";
-        for (int i = 0; i < 16; ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << (int)bufferData[i];
-        }
-        std::cout << "]" << std::endl;
-        //unmap the memory
-        context->buffer.unmap();
-    };
-    Context context = {false, buffer2};
-    wgpuBufferMapAsync(buffer2, MapMode::Read, 0, 16, onBuffer2Mapped, (void*)&context);
-    while(!context.ready) {
-        wgpuPollEvents(device, true /*yieldToBrowser*/);
-    }
-
-    // release buffers
-    buffer1.release();
-    buffer2.release();
+    vertexCount = static_cast<uint32_t>(vertexData.size() / 5); // num points = size / attributes per point
+	
+	// Create vertex buffer
+	BufferDescriptor bufferDesc;
+	bufferDesc.size = vertexData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex; // Vertex usage here!
+	bufferDesc.mappedAtCreation = false;
+	vertexBuffer = device.createBuffer(bufferDesc);
+	
+	// Upload geometry data to the buffer
+	queue.writeBuffer(vertexBuffer, 0, vertexData.data(), bufferDesc.size);
 }

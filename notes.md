@@ -95,6 +95,8 @@ Thus the surface must be configured before use.
 
 WebGPU has a render pipeline which is predefined but can be configured using a *render pipeline* object. Pipeline executes "stages", many fixed function (limited customizability) but others are programmable. In programmable stages a shader is executed across vertices/fragments
 
-## Buffers
+## [Buffers](https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/input-geometry/a-first-vertex-attribute.html)
 
 buffers are just a chunk of memory allocated in the VRAM (gpu memory). `new` or `malloc` for the gpu
+
+In order to pass data to the WGSL to allow for dynamically entered vertices, we create a buffer to store the value of the input for each vertex (GPU side); tell render pipeline how to interpret raw data (layout): set the vertex buffer in the render pass before draw call
