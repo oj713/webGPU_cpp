@@ -23,6 +23,10 @@ cmake . -B build
 cmake -B build-wgpu -DWEBGPU_BACKEND=WGPU
 # OU
 cmake -B build-dawn -DWEBGPU_BACKEND=DAWN
+# OU 
+cmake -B build-dev -DDEV_MODE=ON -DCMAKE_BUILD_TYPE=Debug
+# OU 
+cmake -B build-release -DDEV_MODE=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/App
 ```

@@ -19,7 +19,9 @@ add_subdirectory(glfw3webgpu)
 add_subdirectory(webgpu)
 # minimal project -- create a target of type executable, called App, source code is main.cpp
 add_executable(App 
-    main.cpp) # deleted utility functions
+    main.cpp
+    ResourceManager.h
+    ResourceManager.cpp)
 # add webgpu target as dependency of app
 target_link_libraries(App PRIVATE webgpu glfw glfw3webgpu)
 
@@ -27,6 +29,20 @@ target_link_libraries(App PRIVATE webgpu glfw glfw3webgpu)
 # so we automatically copy it (it's called WGPU_RUNTIME_LIB in general)
 # next to the binary. Not necessary for Dawn but would be necessary for wgpu-native
 target_copy_webgpu_binaries(App)
+
+# add option to enable different settings when developing app than when distributing
+option(DEV_MODE "Set up development helper settings" ON)
+if (DEV_MODE)
+    # dev mode = load resources from source tree so that when we edit resources they're correctly versioned
+    target_compile_definitions(App PRIVATE
+        RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
+    )
+else()
+    # release mode -- load resources relative to executable, ensures portability
+    target_compile_definitions(App PRIVATE
+        RESOURCE_DIR="./resources"
+    )
+endif()
 
 # Set some properties by calling the set_target_properties command
 set_target_properties(App PROPERTIES
@@ -46,5 +62,8 @@ endif()
 # Options specific to emscripten web compiled version
 if (EMSCRIPTEN) 
     set_target_properties(App PROPERTIES SUFFIX ".html")
-    target_link_options(App PRIVATE -sASYNCIFY) # enable emscripten_sleep
+    target_link_options(App PRIVATE 
+        -sASYNCIFY # enable emscripten_sleep
+        --preload-file "${CMAKE_CURRENT_SOURCE_DIR}/resources" # ask emscripten to bundle files within app in virtual file system
+    )
 endif()

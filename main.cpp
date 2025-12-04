@@ -4,6 +4,7 @@
 
 #include <GLFW/glfw3.h>
 #include <glfw3webgpu.h>
+#include "ResourceManager.h"
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
@@ -15,37 +16,6 @@
 
 // no need to add wgpu prefix in front of everything
 using namespace wgpu;
-
-// embed WGSL lang source of shader module -- will be moved to file down the line 
-// tokens w @ are "attrbutes", decorate following object. Eg @builtin(vertex_index) tells us that arg in_vertex_index will be populated by built in vertex_index
-// @builtin(position) means it must be intpereted by rasterizer as vertex position
-const char* shaderSource = R"(
-/* A structure with fields labeled w vertex attribute locations, input to entry point of shader */
-struct VertexInput {
-	@location(0) position: vec2f,
-	@location(1) color: vec3f,
-};
-
-/* struct w fields labeled as builtins, locations used as output of vertex shader (thus input of fragment shader) */
-struct VertexOutput {
-	@builtin(position) position: vec4f,
-	// The location here does not refer to a vertex attribute, it just means that this field must be handled by the rasterizer.
-	@location(0) color: vec3f,
-};
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-	var out: VertexOutput; 
-	out.position = vec4f(in.position, 0.0, 1.0); 
-	out.color = in.color; // forward the color attribute to the fragment shader
-	return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-	return vec4f(in.color, 1.0); // use the interpolated color coming from the vertex shader
-}
-)";
 
 class Application {
     public:
@@ -80,8 +50,9 @@ class Application {
         TextureFormat surfaceFormat = TextureFormat::Undefined;
         std::unique_ptr<ErrorCallback> uncapturedErrorCallbackHandle; 
         RenderPipeline pipeline = nullptr;
-        uint32_t vertexCount;
-        Buffer vertexBuffer = nullptr;
+        uint32_t indexCount;
+        Buffer pointBuffer = nullptr;
+        Buffer indexBuffer = nullptr;
 };
 
 int main () {
@@ -110,6 +81,8 @@ int main () {
 }
 
 bool Application::Initialize() {
+    std::cout << 'C++ version: ' << __cplusplus << std::endl;
+
     // Open Window
     // Initialize library
     if (!glfwInit()) {
@@ -203,7 +176,8 @@ void Application::Terminate() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    vertexBuffer.release();
+    pointBuffer.release();
+    indexBuffer.release();
     pipeline.release();
     queue.release();
     device.release();
@@ -250,8 +224,9 @@ void Application::MainLoop() {
     // set rendering pipeline
     renderPass.setPipeline(pipeline);
     // draw instance of 3 vertices shape
-    renderPass.setVertexBuffer(0, vertexBuffer, 0, vertexBuffer.getSize());
-    renderPass.draw(vertexCount, 1, 0, 0);
+    renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
+    renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
+    renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
     // End
     renderPass.end();
@@ -314,23 +289,14 @@ TextureView Application::GetNextSurfaceTextureView() {
 
 void Application::InitializePipeline() {
     ////////////// programmable stages
-    // shader module talks to binary language of CPU rather than GPU -- app distributed w source code of shaders & compiled on the fly
-    // Shader language is "WGSL" 
-    ShaderModuleDescriptor shaderDesc;
-#ifdef WEBGPU_BACKEND_WGPU
-	shaderDesc.hintCount = 0;
-	shaderDesc.hints = nullptr;
-#endif
-    // NOT leaving nextInChain empty! entry point of extensions mechanism -- either null or pointing to WGPUChainedStruct
-    // structed may recursively have a next element, it has a type
-    ShaderModuleWGSLDescriptor shaderCodeDesc;
-	// Set the chained struct's header
-	shaderCodeDesc.chain.next = nullptr;
-	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
-	// Connect the chain
-	shaderDesc.nextInChain = &shaderCodeDesc.chain;
-	shaderCodeDesc.code = shaderSource; // payload = code block
-	ShaderModule shaderModule = device.createShaderModule(shaderDesc);
+    std::cout << "Creating shader module…" << std::endl;
+    ShaderModule shaderModule = ResourceManager::loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
+    std::cout << "Shader Module: " << shaderModule << std::endl;
+    
+    if (shaderModule == nullptr) {
+        std::cerr << "Could not load shader" << std::endl;
+        exit(1);
+    }
 
     ////////// Specify vertex buffer layout
     VertexBufferLayout vertexBufferLayout;
@@ -427,7 +393,7 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
 
     requiredLimits.limits.maxVertexAttributes = 2; // position, color 
     requiredLimits.limits.maxVertexBuffers = 1;
-    requiredLimits.limits.maxBufferSize = 6 * 5 * sizeof(float); // 6 = num points, 5 = attributes per point
+    requiredLimits.limits.maxBufferSize = 15 * 5 * sizeof(float); // 15 = num points, 5 = attributes per point
     requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float); 
     // necessary for surface configuration
     requiredLimits.limits.maxTextureDimension1D = 480;
@@ -447,25 +413,40 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
 }
 
 void Application::InitializeBuffers() {
-    std::vector<float> vertexData = {
-        // x0,  y0,  r0,  g0,  b0
-        -0.5, -0.5, 1.0, 0.0, 0.0,
-        +0.5, -0.5, 0.0, 1.0, 0.0,
-        +0.0,   +0.5, 0.0, 0.0, 1.0,
+    // de-duplicated point buffer
+    // coords are relative to window dimensions
+    std::vector<float> pointData;
+    // list of indices referencing positions in pointdata
+    std::vector<uint16_t> indexData;
 
-        -0.55f, -0.5, 1.0, 1.0, 0.0,
-        -0.05f, +0.5, 1.0, 0.0, 1.0,
-        -0.55f, +0.5, 0.0, 1.0, 1.0
-    };
-    vertexCount = static_cast<uint32_t>(vertexData.size() / 5); // num points = size / attributes per point
+    // hardcording the file path here is an issue depending on the directory from which command is called
+    // Instead use auto generated path from cmake (alternatively could use command line arg), could switch to just being careful for distribution
+    // define RESOURCE_DIR "/home/me/code/myproject/resources"
+    bool success = ResourceManager::loadGeometry(RESOURCE_DIR "/webgpu.txt", pointData, indexData);
+    if (!success) {
+        std::cerr << "could not load geometry... " << std::endl;
+        exit(1);
+    }
+
+    indexCount = static_cast<uint32_t>(indexData.size());
 	
-	// Create vertex buffer
+	// Create index buffer (GPU side)
 	BufferDescriptor bufferDesc;
-	bufferDesc.size = vertexData.size() * sizeof(float);
-	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex; // Vertex usage here!
+	bufferDesc.size = indexData.size() * sizeof(uint16_t);
+    // write buffer must copy num bytes that is multiple of 4
+    bufferDesc.size = (bufferDesc.size + 3) & ~3; // round up to next multiple of 4
+    indexData.resize((indexData.size() + 1) & ~1);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Index; // Index usage here!
 	bufferDesc.mappedAtCreation = false;
-	vertexBuffer = device.createBuffer(bufferDesc);
-	
-	// Upload geometry data to the buffer
-	queue.writeBuffer(vertexBuffer, 0, vertexData.data(), bufferDesc.size);
+	indexBuffer = device.createBuffer(bufferDesc);
+
+    // Upload index data to the buffer
+	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
+
+    bufferDesc.size = pointData.size() * sizeof(float);
+    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex;
+    pointBuffer = device.createBuffer(bufferDesc);
+
+    // Upload vertex data to the buffer
+	queue.writeBuffer(pointBuffer, 0, pointData.data(), bufferDesc.size);
 }
