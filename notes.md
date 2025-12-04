@@ -113,3 +113,13 @@ Uniforms are global variables inside shaders, value loaded from GPU buffer. *bou
 - create bound buffer
 - configure properties of binding (layout)
 - create a bind group (contains actual bindings, mirros layout described in pipeline and actually connects it to resources. Allows pipeline to be reused as is depending on variants of resource)
+
+There are multiple ways to add a second uniform --
+- in a different bind group
+    - this option is interesting if you want to call the render pipeline w multiple uniform combinations. e.g. use a diff group to store the camera + lighting information (changes only between frames) and to store object information (location, orientation, etc, different for each draw call w/in same frame)
+
+- in the same bind group, but a different binding
+    - interest is to set different visibility depending on the binding. E.g. time is only used in vertex shader, while color only needed by fragment shader. For flexibility, option 1 makes more sense.
+- in the same binding, by replacing the type of uniform w a custom struct
+
+The architecture of the GPU imposes some constraints on organization of fields in a uniform buffer. Offset of a field of type `vec4f`must be a multiple of the size of `vec4f`(ie 16 bytes). Thus the field is **aligned** to 16 bytes. In addition they must be host-sharable, which implies a constraint on structure size. Total size must be a multiple of the alignment size of its largest field (here, multiple of 16 bytes the size of vec4f). Thus we must add padding to our structure

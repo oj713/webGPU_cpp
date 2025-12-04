@@ -13,6 +13,7 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
+#include <array>
 
 // no need to add wgpu prefix in front of everything
 using namespace wgpu;
@@ -30,6 +31,18 @@ class Application {
 
         // Reeturn true while loop should keep running
         bool IsRunning();
+
+    private: 
+        // internal structs
+        /** same structure as in wgsl shader */
+        struct MyUniforms {
+            // offset = 0 * sizeof(vec4f) -> OK
+            std::array<float, 4> color;
+            // offset = 16 = 4 * sizeof(f32) -> OK
+            float time;
+            float _pad[3];
+        };
+        static_assert(sizeof(MyUniforms) % 16 == 0);
 
     private:
         // retrieves next target texture view
@@ -195,8 +208,9 @@ void Application::Terminate() {
 void Application::MainLoop() {
     glfwPollEvents();
     // update uniform
-    float t = static_cast<float>(glfwGetTime()); 
-    queue.writeBuffer(uniformBuffer, 0, &t, sizeof(float));
+    float time = static_cast<float>(glfwGetTime()); 
+    // offsetof auto calculates num bytes so that we can selectively replace attributes
+    queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &time, sizeof(float));
 
     // get next target texture view
     TextureView targetView = GetNextSurfaceTextureView();
@@ -393,14 +407,13 @@ void Application::InitializePipeline() {
     // binding layout
     BindGroupLayoutEntry bindingLayout = Default;
     bindingLayout.binding = 0; // as used in @binding attribute in shader
-    bindingLayout.visibility = ShaderStage::Vertex; // stage that needs to access these resources
+    bindingLayout.visibility = ShaderStage::Vertex | ShaderStage::Fragment; // stage that needs to access these resources
     // fill out one of buffer, sampler + texture, storageTexture
     bindingLayout.buffer.type = BufferBindingType::Uniform;
-    bindingLayout.buffer.minBindingSize = 4 * sizeof(float);
+    bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
 
     // Create a bind group layout
     BindGroupLayoutDescriptor bindGroupLayoutDesc{};
-    bindGroupLayoutDesc.entryCount = 1;
     bindGroupLayoutDesc.entryCount = 1;
     bindGroupLayoutDesc.entries = &bindingLayout;
     bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
@@ -489,11 +502,15 @@ void Application::InitializeBuffers() {
 
     // uniform buffer
     // only contains 1 float w value time, but need other 3 for alignment constraints
-    bufferDesc.size = 4 * sizeof(float);
+    bufferDesc.size = sizeof(MyUniforms);
     bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform; 
+    bufferDesc.mappedAtCreation = false;
     uniformBuffer = device.createBuffer(bufferDesc);
-    float currentTime = 1.0f;
-    queue.writeBuffer(uniformBuffer, 0, &currentTime, sizeof(float));
+
+    MyUniforms uniforms;
+    uniforms.time = 1.0f; 
+    uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
+    queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
 }
 
 void Application::InitializeBindGroups() {
@@ -503,7 +520,7 @@ void Application::InitializeBindGroups() {
     binding.binding = 0; // index of binding
     binding.buffer = uniformBuffer; // buffer it is bound to
     binding.offset = 0; // offset to enable multiple block reads
-    binding.size = 4 * sizeof(float);
+    binding.size = sizeof(MyUniforms);
 
     BindGroupDescriptor bindGroupDesc{};
     bindGroupDesc.layout = bindGroupLayout;
