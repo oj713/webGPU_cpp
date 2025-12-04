@@ -104,3 +104,12 @@ In order to pass data to the WGSL to allow for dynamically entered vertices, we 
 ## [Index Buffer](https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/input-geometry/index-buffer.html)
 
 Separates list of vertex attributes from actual order they're connected. Consider that in a shape with multiple planes, listing every shape's points results in duplicated data (shared points). Usually more compact to separate position from connectivity and can thus save a lot of VRAM.
+
+## [Uniforms](https://eliemichel.github.io/LearnWebGPU/basic-3d-rendering/shader-uniforms/a-first-uniform.html)
+
+Uniforms are global variables inside shaders, value loaded from GPU buffer. *bound* to buffer. Value *uniform* across diff vertices/fragment of a draw call, but can change from one call to another by updating values of bound buffer
+
+- declare the uniform in the shader
+- create bound buffer
+- configure properties of binding (layout)
+- create a bind group (contains actual bindings, mirros layout described in pipeline and actually connects it to resources. Allows pipeline to be reused as is depending on variants of resource)

@@ -39,7 +39,7 @@ class Application {
         void InitializePipeline();
         RequiredLimits GetRequiredLimits(Adapter adapter) const;
         void InitializeBuffers();
-
+        void InitializeBindGroups();
     
     private:
         // shared vars between init and main loop
@@ -53,6 +53,10 @@ class Application {
         uint32_t indexCount;
         Buffer pointBuffer = nullptr;
         Buffer indexBuffer = nullptr;
+        Buffer uniformBuffer = nullptr;
+        PipelineLayout layout = nullptr;
+        BindGroupLayout bindGroupLayout = nullptr;
+        BindGroup bindGroup = nullptr;
 };
 
 int main () {
@@ -166,6 +170,7 @@ bool Application::Initialize() {
 
     InitializePipeline();
     InitializeBuffers();
+    InitializeBindGroups();
 
     return true;
 }
@@ -174,8 +179,12 @@ void Application::Terminate() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
+    layout.release();
+    bindGroupLayout.release();
+    bindGroup.release();
     pointBuffer.release();
     indexBuffer.release();
+    uniformBuffer.release();
     pipeline.release();
     queue.release();
     device.release();
@@ -185,6 +194,9 @@ void Application::Terminate() {
 
 void Application::MainLoop() {
     glfwPollEvents();
+    // update uniform
+    float t = static_cast<float>(glfwGetTime()); 
+    queue.writeBuffer(uniformBuffer, 0, &t, sizeof(float));
 
     // get next target texture view
     TextureView targetView = GetNextSurfaceTextureView();
@@ -221,9 +233,12 @@ void Application::MainLoop() {
 
     // set rendering pipeline
     renderPass.setPipeline(pipeline);
-    // draw instance of 3 vertices shape
+    // set buffer
     renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
     renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
+    // set binding group
+    renderPass.setBindGroup(0, bindGroup, 0, nullptr);
+    // draw call
     renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
     // End
@@ -334,7 +349,7 @@ void Application::InitializePipeline() {
     pipelineDesc.primitive.frontFace = FrontFace::CCW; // when looking from front, corner vertices in counter clockwise order
     pipelineDesc.primitive.cullMode = CullMode::None; // do not hide faces pointing away from us (usually for optimization). Usually Front, but None better for developing
 
-    // Describe fragment pipeline state
+    ///////////////// Describe fragment pipeline state
     // fragment shader invoked for each fragment, receives interpolated values & output the final color of fragment
     FragmentState fragmentState;
 	fragmentState.module = shaderModule;
@@ -374,9 +389,28 @@ void Application::InitializePipeline() {
     pipelineDesc.multisample.mask = ~0u; // all bits on
     pipelineDesc.multisample.alphaToCoverageEnabled = false; 
 
-    // Describe pipeline layout
-    // shaders might need access to input & output resources (buffers or textures)
-    pipelineDesc.layout = nullptr; 
+    /////////// Describe pipeline layout
+    // binding layout
+    BindGroupLayoutEntry bindingLayout = Default;
+    bindingLayout.binding = 0; // as used in @binding attribute in shader
+    bindingLayout.visibility = ShaderStage::Vertex; // stage that needs to access these resources
+    // fill out one of buffer, sampler + texture, storageTexture
+    bindingLayout.buffer.type = BufferBindingType::Uniform;
+    bindingLayout.buffer.minBindingSize = 4 * sizeof(float);
+
+    // Create a bind group layout
+    BindGroupLayoutDescriptor bindGroupLayoutDesc{};
+    bindGroupLayoutDesc.entryCount = 1;
+    bindGroupLayoutDesc.entryCount = 1;
+    bindGroupLayoutDesc.entries = &bindingLayout;
+    bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
+
+    // create pipeline layout
+    PipelineLayoutDescriptor layoutDesc{};
+    layoutDesc.bindGroupLayoutCount = 1;
+    layoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
+    layout = device.createPipelineLayout(layoutDesc);
+    pipelineDesc.layout = layout; 
 
     pipeline = device.createRenderPipeline(pipelineDesc);
     shaderModule.release();
@@ -398,6 +432,10 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
     requiredLimits.limits.maxTextureDimension2D = 640;
     // max of 3 floats forwarded from vertex to fragment shader
     requiredLimits.limits.maxInterStageShaderComponents = 3; 
+
+    requiredLimits.limits.maxBindGroups = 1; 
+    requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
+    requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4; // more than we need
 
     // https://www.w3.org/TR/webgpu/#limit-default
 
@@ -441,10 +479,36 @@ void Application::InitializeBuffers() {
     // Upload index data to the buffer
 	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
 
+    // point buffer
     bufferDesc.size = pointData.size() * sizeof(float);
     bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex;
     pointBuffer = device.createBuffer(bufferDesc);
 
     // Upload vertex data to the buffer
 	queue.writeBuffer(pointBuffer, 0, pointData.data(), bufferDesc.size);
+
+    // uniform buffer
+    // only contains 1 float w value time, but need other 3 for alignment constraints
+    bufferDesc.size = 4 * sizeof(float);
+    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform; 
+    uniformBuffer = device.createBuffer(bufferDesc);
+    float currentTime = 1.0f;
+    queue.writeBuffer(uniformBuffer, 0, &currentTime, sizeof(float));
+}
+
+void Application::InitializeBindGroups() {
+    BindGroupEntry binding{};
+
+    // setup binding
+    binding.binding = 0; // index of binding
+    binding.buffer = uniformBuffer; // buffer it is bound to
+    binding.offset = 0; // offset to enable multiple block reads
+    binding.size = 4 * sizeof(float);
+
+    BindGroupDescriptor bindGroupDesc{};
+    bindGroupDesc.layout = bindGroupLayout;
+    // must be as many bindings as declared in render pipeline layout
+    bindGroupDesc.entryCount = 1;
+    bindGroupDesc.entries = &binding;
+    bindGroup = device.createBindGroup(bindGroupDesc);
 }
