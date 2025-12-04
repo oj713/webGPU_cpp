@@ -4,7 +4,6 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <filesystem>
 
 using namespace wgpu;
 
@@ -68,7 +67,7 @@ bool ResourceManager::loadGeometry(
     return true;
 }
 
-ShaderModule loadShaderModule(
+ShaderModule ResourceManager::loadShaderModule(
     const std::filesystem::path& path,
     Device device
 ) {

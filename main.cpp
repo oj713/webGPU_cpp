@@ -81,8 +81,6 @@ int main () {
 }
 
 bool Application::Initialize() {
-    std::cout << 'C++ version: ' << __cplusplus << std::endl;
-
     // Open Window
     // Initialize library
     if (!glfwInit()) {
