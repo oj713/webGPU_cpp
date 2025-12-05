@@ -123,3 +123,6 @@ There are multiple ways to add a second uniform --
 - in the same binding, by replacing the type of uniform w a custom struct
 
 The architecture of the GPU imposes some constraints on organization of fields in a uniform buffer. Offset of a field of type `vec4f`must be a multiple of the size of `vec4f`(ie 16 bytes). Thus the field is **aligned** to 16 bytes. In addition they must be host-sharable, which implies a constraint on structure size. Total size must be a multiple of the alignment size of its largest field (here, multiple of 16 bytes the size of vec4f). Thus we must add padding to our structure
+
+**Dynamic uniform buffers** allow us to issue multiple calls to the draw method (for example, two draw to objects w diff uniform values). 
+* Have buffer that is twice the size of MyUniforms. First draw call - set offset to 0 to use first set of values, 2nd draw call uses offset of size(MyUniforms). Value of offset is constrained to be a multiple of the minUniformBufferOffsetAlignment limit of device (stride must be rounded up)

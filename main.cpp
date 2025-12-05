@@ -18,6 +18,14 @@
 // no need to add wgpu prefix in front of everything
 using namespace wgpu;
 
+/**
+ * Round 'value' up to the next multiplier of 'step'.
+ */
+uint32_t ceilToNextMultiple(uint32_t value, uint32_t step) {
+    uint32_t divide_and_ceil = value / step + (value % step == 0 ? 0 : 1);
+    return step * divide_and_ceil;
+}
+
 class Application {
     public:
         // Initialize everything, return success
@@ -50,7 +58,7 @@ class Application {
 
         // Substeps of Initialize to create render pipeline
         void InitializePipeline();
-        RequiredLimits GetRequiredLimits(Adapter adapter) const;
+        RequiredLimits GetRequiredLimits(Adapter adapter);
         void InitializeBuffers();
         void InitializeBindGroups();
     
@@ -70,6 +78,7 @@ class Application {
         PipelineLayout layout = nullptr;
         BindGroupLayout bindGroupLayout = nullptr;
         BindGroup bindGroup = nullptr;
+        uint32_t uniformStride; // Required offset for dynamic uniform buffers
 };
 
 int main () {
@@ -247,12 +256,19 @@ void Application::MainLoop() {
 
     // set rendering pipeline
     renderPass.setPipeline(pipeline);
+    uint32_t dynamicOffset = 0;
     // set buffer
     renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
     renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
-    // set binding group
-    renderPass.setBindGroup(0, bindGroup, 0, nullptr);
-    // draw call
+
+    // set binding group number 1
+    dynamicOffset = 0 * uniformStride;
+    renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset); // 0, nullptr
+    renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
+
+    // set binding group number 2
+    dynamicOffset = 1 * uniformStride;
+    renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset); // 0, nullptr
     renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
     // End
@@ -411,6 +427,8 @@ void Application::InitializePipeline() {
     // fill out one of buffer, sampler + texture, storageTexture
     bindingLayout.buffer.type = BufferBindingType::Uniform;
     bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
+    // makes binding dynamic so that we can offset it between draw calls
+    bindingLayout.buffer.hasDynamicOffset = true;
 
     // Create a bind group layout
     BindGroupLayoutDescriptor bindGroupLayoutDesc{};
@@ -429,7 +447,7 @@ void Application::InitializePipeline() {
     shaderModule.release();
 }
 
-RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
+RequiredLimits Application::GetRequiredLimits(Adapter adapter) {
     //get adapter supported limits in case needed
     SupportedLimits supportedLimits;
 	adapter.getLimits(&supportedLimits);
@@ -449,6 +467,7 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
     requiredLimits.limits.maxBindGroups = 1; 
     requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
     requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4; // more than we need
+    requiredLimits.limits.maxDynamicUniformBuffersPerPipelineLayout = 1; // add requirements
 
     // https://www.w3.org/TR/webgpu/#limit-default
 
@@ -457,6 +476,10 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
     // limits.
     requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
     requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
+
+    // Define the uniformstride variable while we're at it
+    // stride must be rounded to closest multiple of minUniformBufferOffsetAlignment
+    uniformStride = ceilToNextMultiple((uint32_t)sizeof(MyUniforms), (uint32_t)requiredLimits.limits.minUniformBufferOffsetAlignment);
 
     return requiredLimits;
 }
@@ -501,16 +524,21 @@ void Application::InitializeBuffers() {
 	queue.writeBuffer(pointBuffer, 0, pointData.data(), bufferDesc.size);
 
     // uniform buffer
-    // only contains 1 float w value time, but need other 3 for alignment constraints
-    bufferDesc.size = sizeof(MyUniforms);
+    bufferDesc.size = uniformStride + sizeof(MyUniforms);
     bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform; 
     bufferDesc.mappedAtCreation = false;
     uniformBuffer = device.createBuffer(bufferDesc);
 
     MyUniforms uniforms;
+    // upload first value
     uniforms.time = 1.0f; 
     uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
     queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
+
+    // upload second value -- nonzero offset
+    uniforms.time = -1.0f; 
+    uniforms.color = { 1.0f, 1.0f, 1.0f, 0.7f };
+    queue.writeBuffer(uniformBuffer, uniformStride, &uniforms, sizeof(MyUniforms));
 }
 
 void Application::InitializeBindGroups() {
