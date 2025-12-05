@@ -185,32 +185,19 @@ void Application::Compute() {
     queue.release();
     
     // Print output
-    struct Context {
-        bool ready;
-        Buffer buffer;
-    };
-
-    auto onBuffer2Mapped = [](WGPUBufferMapAsyncStatus status, void* pUserData) {
-        // we know by convention with ourselves that user data is a pointer to context
-        Context* context = reinterpret_cast<Context*>(pUserData);
-        context->ready = true;
-
+    bool done = false;
+    auto handle = mapBuffer.mapAsync(MapMode::Read, 0, bufferSize, [&](BufferMapAsyncStatus status) {
         if (status == BufferMapAsyncStatus::Success) {
             std::cout << "qsddsq" << std::endl;
-            /**
-            const float* output = (const float*)context->buffer.getConstMappedRange(0, bufferSize);
-            for(size_t i = 0; i < *output.size(); i++) {
+            const float* output = (const float*)mapBuffer.getConstMappedRange(0, bufferSize);
+            for(size_t i = 0; i < input.size(); i++) {
                 std::cout << "input " << input[i] << " became " << output [i] << std::endl;
             }
-            context->buffer.unmap();
-            */
+            mapBuffer.unmap();
         }
-    };
-
-    Context context = {false, mapBuffer};
-    wgpuBufferMapAsync(mapBuffer, MapMode::Read, 0, bufferSize, onBuffer2Mapped, (void*)&context);
-
-    while (!context.ready) {
+        done = true;
+    });
+    while (!done) {
         wgpuPollEvents(device, true); // yieldToBrowser
     }
 }
@@ -230,19 +217,18 @@ void Application::InitializePipeline() {
     PipelineLayoutDescriptor pipelineLayoutDesc;
     pipelineLayoutDesc.bindGroupLayoutCount = 1;
     pipelineLayoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
-    PipelineLayout pipelineLayout = device.createPipelineLayout(pipelineLayoutDesc);
+    layout = device.createPipelineLayout(pipelineLayoutDesc);
 
     // Create compute pipeline
     ComputePipelineDescriptor computePipelineDesc = Default;
     computePipelineDesc.compute.constantCount = 0;
     computePipelineDesc.compute.constants = nullptr;
     computePipelineDesc.compute.entryPoint = "computeStuff"; // computestuff defined in shader file
-    computePipelineDesc.layout = pipelineLayout;
+    computePipelineDesc.layout = layout;
     computePipelineDesc.compute.module = computeShaderModule;
 
     pipeline = device.createComputePipeline(computePipelineDesc);
     computeShaderModule.release();
-    pipelineLayout.release();
 }
 
 RequiredLimits Application::GetRequiredLimits(Adapter adapter) {
@@ -258,7 +244,8 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) {
 	requiredLimits.limits.maxInterStageShaderComponents = 17;
 
     requiredLimits.limits.maxBufferSize = bufferSize; // 15 = num points, 5 = attributes per point
-    requiredLimits.limits.maxBindGroups = 2; 
+    requiredLimits.limits.maxBindGroups = 2; //1 bind group
+    requiredLimits.limits.maxBindingsPerBindGroup = 2; // num bindings within bind group
 
     // Buffers with storage usage are confronted to device limits
     requiredLimits.limits.maxStorageBuffersPerShaderStage = 2;
