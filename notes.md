@@ -5,6 +5,31 @@ https://eliemichel.github.io/LearnWebGPU/getting-started/project-setup.html
 WebGPU is a *Render Hardware Interface*, meaning that it means to provide a single itnerface for multiple underlying hardwares and OSes. Within the C++ code, WebGPU is just a header file listing available procedures. However, the compiler must know where to find the implementation of these features, so we must pass these instructions explicitly. 
 There are two main implementations of the native header -- [wgpu-native](https://github.com/gfx-rs/wgpu-native) and Google's [Dawn](https://dawn.googlesource.com/dawn). Here we choose to copy Dawn (more verbose) to the root folder. 
 
+
+# Notes on Computation
+Rendering 3D Data is original use, but GPU can also be used for general purpose computation -- no need to call 3D specific parts of pipeline like rasterization
+Compute shaders are shaders run outside of fixed-function pipeline
+GPU is much better than CPU at Single Instruction Multiple Data (SIMD) parallelism -- ie operations that are applied independently to each value (highly parallel operations). 
+
+What is `computePass.dispatchWorkgroups(x, y, z)`?
+
+a compute shader is good at doing the same thing, multiple times, in parallel. Built in dispatch op is possibility to call shader entry point multiple times
+Don't provide single number of concurrent calls, rather express as grid (aka dispatch) of x * y * z workgroups. Each workgroup is a block of w * h * d threads, each running entry point. Workgroup size is set by shader entry point (in wgsl file)
+
+Even if combinations have the same num threads (x, y, z) they might not equivalent. Jobs are not all launched at once -- schedular organises execution of individual workgroups. Jobs from same workgroup launched together, but diff workgroups not necessarily. Appropriate workgroup size depends on task that threads run. 
+
+* w * h * d should be multiple of 32, as within a workgroup threads are launched by **warps** of 32 threads
+* Total resource usage of workgroup should be minimized
+* when threads share memory it is cheaper if in same workgroup (more so if in same warp)
+* threads w same **branching path** should b grouped. Threads from same warp have same instruction pointers
+* Workgroup sizes should be powers of 2
+
+Also different for (w, h, d) -- size gives hints to hardware of consistency of memory. CPU and GPU try to guess patterns in how consecutive and concurrent actions use memory, in order to prefetch memory/group io/etc. A graphics API provides grid-based data storage, grid-based concurrency models. 
+
+**Within our example** -- data is in 1D buffers, so our dispatch is a 1D series of workgroups (x, y, z) = (x, 1, 1) and (w, h, d) = (w, 1, 1)
+
+**Copying data back to CPU** -- one of the points of WebGPU computation is to keep computation on the GPU side, since copying is expensive. In our case we want to read the data back, however, to verify that things went well. The `mapAsync` function from playing w buffers isn't compatible here bc its incompatible with `BufferUsage::Storage`. So instead we create a third "map buffer"
+
 ## [Adapters](https://eliemichel.github.io/LearnWebGPU/getting-started/adapter-and-device/the-adapter.html#lit-1)
 Must select *adapter* before choosing device. Host system may expose multiple adapters if there are multiple GPUs available or something for a virtual device. Adapters assess capabilities of user's hardware, which then determine behavior of application. Devices are created based on chosen capabilities. Not possible to inadvertently rely on device-specific capabilities. 
 
