@@ -20,7 +20,7 @@ void wgpuPollEvents([[maybe_unused]] Device device, [[maybe_unused]] bool yieldT
 #if defined(WEBGPU_BACKEND_DAWN)
     device.tick();
 #elif defined(WEBGPU_BACKEND_WGPU)
-    device.poll(false);
+    wgpuDevicePoll(device, false, nullptr);
 #elif defined(WEBGPU_BACKEND_EMSCRIPTEN)
     if (yieldToWebBrowser) {
         emscripten_sleep(100);
@@ -45,11 +45,12 @@ class Application {
         RequiredLimits GetRequiredLimits(Adapter adapter);
         void InitializeBuffers();
         void InitializeBindGroups();
+        void InitializeBindGroupLayout();
     
     private:
         // shared vars between init and main loop
+        Instance instance = nullptr;
         Device device = nullptr;
-        Queue queue = nullptr;
         std::unique_ptr<ErrorCallback> uncapturedErrorCallbackHandle; 
         ComputePipeline pipeline = nullptr;
         Buffer inputBuffer = nullptr;
@@ -58,7 +59,6 @@ class Application {
         PipelineLayout layout = nullptr;
         BindGroupLayout bindGroupLayout = nullptr;
         BindGroup bindGroup = nullptr;
-        uint32_t uniformStride; // Required offset for dynamic uniform buffers
         uint32_t bufferSize; // size of buffer
 };
 
@@ -80,7 +80,7 @@ bool Application::Initialize() {
     bufferSize = 64 * sizeof(float);
 
     // Create WebGPU instance
-    Instance instance = wgpuCreateInstance(nullptr);
+    instance = wgpuCreateInstance(nullptr);
     // Check instance
     if (!instance) {
         std::cerr << "could not initialise webgpu" << std::endl;
@@ -93,13 +93,12 @@ bool Application::Initialize() {
     Adapter adapter = instance.requestAdapter(adapterOpts);
     std::cout << "Got adapter: " << adapter << std::endl;
     // No longer need instance once we have adapter -- instance not destroyed bc referenced by adapter.
-    instance.release();
+    // instance.release();
 
     std::cout << "Requesting device..." << std::endl;
 	DeviceDescriptor deviceDesc = {};
 	deviceDesc.label = "My Device";
 	deviceDesc.requiredFeatureCount = 0;
-	deviceDesc.requiredLimits = nullptr;
 	deviceDesc.defaultQueue.nextInChain = nullptr;
 	deviceDesc.defaultQueue.label = "The default queue";
 	deviceDesc.deviceLostCallback = [](WGPUDeviceLostReason reason, char const* message, void* /* pUserData */) {
@@ -120,10 +119,8 @@ bool Application::Initialize() {
 		if (message) std::cout << " (" << message << ")";
 		std::cout << std::endl;
 	});
-
-    // Look at Queue
-    queue = device.getQueue();
-
+    
+    InitializeBindGroupLayout();
     InitializePipeline();
     InitializeBuffers();
     InitializeBindGroups();
@@ -132,6 +129,7 @@ bool Application::Initialize() {
 }
 
 void Application::Terminate() {
+    instance.release();
     layout.release();
     bindGroupLayout.release();
     bindGroup.release();
@@ -139,23 +137,28 @@ void Application::Terminate() {
     outputBuffer.release();
     mapBuffer.release();
     pipeline.release();
-    queue.release();
     device.release();
 }
 
 void Application::Compute() {
+    Queue queue = device.getQueue();
+
+    // add data to input buffer
+    std::vector<float>input(bufferSize/sizeof(float));
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = 0.1f * i;
+    }
+    queue.writeBuffer(inputBuffer, 0, input.data(), input.size() * sizeof(float));
+
     // Initialize a command encoder
-    queue = device.getQueue();
     CommandEncoderDescriptor encoderDesc = Default;
     CommandEncoder encoder = device.createCommandEncoder(encoderDesc);
-
     // Create compute pass -- much simpler than render pass, since no fixed function stage means theres basically nothing to configure.
     ComputePassDescriptor computePassDesc;
     computePassDesc.timestampWrites = nullptr;
     ComputePassEncoder computePass = encoder.beginComputePass(computePassDesc);
 
     // Use compute pass
-
     computePass.setPipeline(pipeline);
     computePass.setBindGroup(0, bindGroup, 0, nullptr);
     // replaces "draw"
@@ -164,7 +167,7 @@ void Application::Compute() {
     uint32_t workgroupSize = 32;
     // Ceils invocationCount/workgroupSize
     uint32_t workgroupCount = (invocationCount + workgroupSize - 1) / workgroupSize;
-    computePass.dispatchWorkingGroups(workgroupCount, 1, 1);
+    wgpuComputePassEncoderDispatchWorkgroups(computePass, workgroupCount, 1, 1);
 
     computePass.end();
     computePass.release();
@@ -179,21 +182,36 @@ void Application::Compute() {
     // cleanup
     encoder.release();
     commands.release();
-
+    queue.release();
+    
     // Print output
-    bool done = false;
-    auto handle = mapBuffer.mapAsync(MapMode::Read, 0, bufferSize, [&](BufferMapAsyncStatus status) {
+    struct Context {
+        bool ready;
+        Buffer buffer;
+    };
+
+    auto onBuffer2Mapped = [](WGPUBufferMapAsyncStatus status, void* pUserData) {
+        // we know by convention with ourselves that user data is a pointer to context
+        Context* context = reinterpret_cast<Context*>(pUserData);
+        context->ready = true;
+
         if (status == BufferMapAsyncStatus::Success) {
-            const float* output = (const float*)mapBuffer.getConstMappedRange(0, bufferSize);
-            for(int i = 0, i<input.size();i++) {
+            std::cout << "qsddsq" << std::endl;
+            /**
+            const float* output = (const float*)context->buffer.getConstMappedRange(0, bufferSize);
+            for(size_t i = 0; i < *output.size(); i++) {
                 std::cout << "input " << input[i] << " became " << output [i] << std::endl;
             }
-            mapBuffer.unmap();
+            context->buffer.unmap();
+            */
         }
-        done = true;
-    });
-    while (!done) {
-        wgpuPollEvents(device, true /*yieldToBrowser*/);
+    };
+
+    Context context = {false, mapBuffer};
+    wgpuBufferMapAsync(mapBuffer, MapMode::Read, 0, bufferSize, onBuffer2Mapped, (void*)&context);
+
+    while (!context.ready) {
+        wgpuPollEvents(device, true); // yieldToBrowser
     }
 }
 
@@ -208,34 +226,19 @@ void Application::InitializePipeline() {
         exit(1);
     }
 
-    ComputePipelineDescriptor computePipelineDesc = Default;
-    computePipelineDesc.compute.entryPoint = "computeStuff"; // computestuff defined in shader file
-    computePipelineDesc.compute.module = computeShaderModule;
-
-    // Initialize binding group layout
-    std::vector<BindGroupLayoutEntry> bindings(2, Default);
-
-    // input buffer
-    bindings[0].binding = 0;
-    bindings[0].buffer.type = BufferBindingType::ReadOnlyStorage;
-    bindings[0].visibility = ShaderStage::Compute;
-
-    // Output buffer
-    bindings[1].binding = 1;
-    bindings[1].buffer.type = BufferBindingType::Storage;
-    bindings[1].visibility = ShaderStage::Compute;
-
-    BindGroupLayoutDescriptor bindGroupLayoutDesc;
-    bindGroupLayoutDesc.entryCount = (uint32_t)bindings.size();
-    bindGroupLayoutDesc.entries = bindings.data();
-    BindGroupLayout bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
-
     // Create compute pipeline layout
     PipelineLayoutDescriptor pipelineLayoutDesc;
     pipelineLayoutDesc.bindGroupLayoutCount = 1;
     pipelineLayoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
     PipelineLayout pipelineLayout = device.createPipelineLayout(pipelineLayoutDesc);
+
+    // Create compute pipeline
+    ComputePipelineDescriptor computePipelineDesc = Default;
+    computePipelineDesc.compute.constantCount = 0;
+    computePipelineDesc.compute.constants = nullptr;
+    computePipelineDesc.compute.entryPoint = "computeStuff"; // computestuff defined in shader file
     computePipelineDesc.layout = pipelineLayout;
+    computePipelineDesc.compute.module = computeShaderModule;
 
     pipeline = device.createComputePipeline(computePipelineDesc);
     computeShaderModule.release();
@@ -248,6 +251,11 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) {
 	adapter.getLimits(&supportedLimits);
 
     RequiredLimits requiredLimits = Default;
+
+    // copied over from reference code
+	requiredLimits.limits.maxSampledTexturesPerShaderStage = 3;
+	requiredLimits.limits.maxSamplersPerShaderStage = 1;
+	requiredLimits.limits.maxInterStageShaderComponents = 17;
 
     requiredLimits.limits.maxBufferSize = bufferSize; // 15 = num points, 5 = attributes per point
     requiredLimits.limits.maxBindGroups = 2; 
@@ -275,27 +283,21 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) {
 }
 
 void Application::InitializeBuffers() {
-    // Input buffer
     BufferDescriptor bufferDesc;
 	bufferDesc.size = bufferSize;
+    bufferDesc.mappedAtCreation = false;
+
+    // Input buffer
 	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Storage; // Storage usage here!
-	bufferDesc.mappedAtCreation = false;
 	inputBuffer = device.createBuffer(bufferDesc);
 
     // output buffer
-    bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Storage;
+    bufferDesc.usage = BufferUsage::CopySrc | BufferUsage::Storage;
     outputBuffer = device.createBuffer(bufferDesc);
 
     //map buffer to transmit data back to cpu
     bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::MapRead;
     mapBuffer = device.createBuffer(bufferDesc);
-
-    // add data to input buffer
-    std::vector<float>input(bufferSize/sizeof(float));
-    for (int i = 0; i < input.size(); ++i) {
-        input[i] = 0.1f * i;
-    }
-    queue.writeBuffer(inputBuffer, 0, input.data(), bufferSize);
 }
 
 // Create a bind-group layout that matches bindings in wgsl 
@@ -320,4 +322,25 @@ void Application::InitializeBindGroups() {
     bindGroupDesc.entryCount = (uint32_t)entries.size();
     bindGroupDesc.entries = (WGPUBindGroupEntry*)entries.data();
     bindGroup = device.createBindGroup(bindGroupDesc);
+}
+
+void Application::InitializeBindGroupLayout() {
+    std::vector<BindGroupLayoutEntry> bindings(2, Default);
+
+    // input buffer
+    bindings[0].binding = 0;
+    bindings[0].buffer.minBindingSize = bufferSize;
+    bindings[0].buffer.type = BufferBindingType::ReadOnlyStorage;
+    bindings[0].visibility = ShaderStage::Compute;
+
+    // Output buffer
+    bindings[1].binding = 1;
+    bindings[1].buffer.minBindingSize = bufferSize;
+    bindings[1].buffer.type = BufferBindingType::Storage;
+    bindings[1].visibility = ShaderStage::Compute;
+
+    BindGroupLayoutDescriptor bindGroupLayoutDesc;
+    bindGroupLayoutDesc.entryCount = (uint32_t)bindings.size();
+    bindGroupLayoutDesc.entries = bindings.data();
+    bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
 }
